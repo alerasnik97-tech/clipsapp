@@ -127,7 +127,7 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
         public_id=public_id,
         overwrite=True,
         resource_type="image",
-        eager=[transformaciones],
+        eager=transformaciones,
         eager_async=False
     )
 
