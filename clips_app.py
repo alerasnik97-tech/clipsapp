@@ -159,72 +159,91 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
         frame = np.array(Image.fromarray(crop).resize((W, H), Image.LANCZOS))
         frames.append(frame)
 
-    # ── Codificar MP4 (sin audio primero) ───────────────────────────────────
-    tmp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp_video.close()
+    # ── Codificar MP4 final con ffmpeg (video + audio opcional) ─────────────
+    import subprocess
+    import imageio_ffmpeg
+    ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
 
+    # Guardar frames como video sin audio primero
+    tmp_raw = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_raw.close()
     writer = imageio.get_writer(
-        tmp_video.name,
+        tmp_raw.name,
         fps=FPS,
         codec="libx264",
-        output_params=["-pix_fmt", "yuv420p", "-crf", "35", "-preset", "ultrafast", "-tune", "stillimage"]
+        output_params=["-pix_fmt", "yuv420p", "-crf", "35", "-preset", "ultrafast"]
     )
     for frame in frames:
         writer.append_data(frame)
     writer.close()
 
-    # ── Mezclar audio si hay Public ID ───────────────────────────────────────
-    output_path = tmp_video.name
+    # Preparar audio si existe
+    tmp_audio_path = None
     if audio_public_id and audio_public_id.strip():
         try:
-            import subprocess
-            import imageio_ffmpeg
-            ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()  # ffmpeg incluido con imageio-ffmpeg
-
             cfg_c = cloudinary.config()
             audio_id = audio_public_id.strip()
-
-            # Probar todas las URLs posibles de Cloudinary para el audio
             audio_urls = [
                 f"https://res.cloudinary.com/{cfg_c.cloud_name}/video/upload/{audio_id}.mp3",
                 f"https://res.cloudinary.com/{cfg_c.cloud_name}/video/upload/{audio_id}",
                 f"https://res.cloudinary.com/{cfg_c.cloud_name}/raw/upload/{audio_id}.mp3",
                 f"https://res.cloudinary.com/{cfg_c.cloud_name}/raw/upload/{audio_id}",
             ]
-
-            audio_bytes = None
             for audio_url in audio_urls:
                 r = requests.get(audio_url, timeout=30)
                 if r.status_code == 200 and len(r.content) > 1000:
-                    audio_bytes = r.content
+                    tmp_audio_path = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+                    tmp_audio_path.write(r.content)
+                    tmp_audio_path.close()
+                    tmp_audio_path = tmp_audio_path.name
                     break
+        except Exception:
+            tmp_audio_path = None
 
-            if audio_bytes:
-                tmp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-                tmp_audio.write(audio_bytes)
-                tmp_audio.close()
+    # Re-encodear con ffmpeg para garantizar compatibilidad con ML
+    tmp_final = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_final.close()
 
-                tmp_mixed = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                tmp_mixed.close()
+    if tmp_audio_path:
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", tmp_raw.name,
+            "-i", tmp_audio_path,
+            "-c:v", "libx264",
+            "-profile:v", "baseline",  # perfil más compatible
+            "-level", "3.1",
+            "-pix_fmt", "yuv420p",
+            "-crf", "28",
+            "-preset", "fast",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-ar", "44100",
+            "-ac", "2",
+            "-shortest",
+            "-movflags", "+faststart",  # streaming-friendly
+            "-map", "0:v:0", "-map", "1:a:0",
+            tmp_final.name
+        ]
+    else:
+        cmd = [
+            ffmpeg_bin, "-y",
+            "-i", tmp_raw.name,
+            "-c:v", "libx264",
+            "-profile:v", "baseline",
+            "-level", "3.1",
+            "-pix_fmt", "yuv420p",
+            "-crf", "28",
+            "-preset", "fast",
+            "-movflags", "+faststart",
+            "-an",  # sin audio
+            tmp_final.name
+        ]
 
-                # Mezclar video + audio con el ffmpeg de imageio-ffmpeg
-                subprocess.run([
-                    ffmpeg_bin, "-y",
-                    "-i", tmp_video.name,
-                    "-i", tmp_audio.name,
-                    "-c:v", "copy",
-                    "-c:a", "aac", "-b:a", "128k",
-                    "-shortest",
-                    "-map", "0:v:0", "-map", "1:a:0",
-                    tmp_mixed.name
-                ], check=True, capture_output=True)
-
-                os.unlink(tmp_video.name)
-                os.unlink(tmp_audio.name)
-                output_path = tmp_mixed.name
-        except Exception as e:
-            # Si falla el audio, subimos el video sin audio
-            output_path = tmp_video.name
+    subprocess.run(cmd, check=True, capture_output=True)
+    os.unlink(tmp_raw.name)
+    if tmp_audio_path and os.path.exists(tmp_audio_path):
+        os.unlink(tmp_audio_path)
+    output_path = tmp_final.name
 
     # ── Subir MP4 a Cloudinary ───────────────────────────────────────────────
     result = cloudinary.uploader.upload(
