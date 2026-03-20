@@ -599,10 +599,10 @@ elif step == 4:
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════
-# PASO 5 — Subir videos a MercadoLibre
+# PASO 5 — Descargar videos
 # ══════════════════════════════════════════════════════════════
 elif step == 5:
-    st.subheader("Paso 5 — Subir videos a MercadoLibre")
+    st.subheader("Paso 5 — Descargar videos")
 
     ok_dict = results.get("ok", {})
     if not ok_dict:
@@ -611,123 +611,44 @@ elif step == 5:
             save_json(STEP_FILE, 3); st.rerun()
         st.stop()
 
-    ya_ok_up  = set(upload_res.get("ok", {}).keys())
-    ya_err_up = dict(upload_res.get("errores", {}))
-    pendientes_up = [i for i in ok_dict.keys() if i not in ya_ok_up and i not in ya_err_up]
+    st.info(
+        "📥 Descargá cada video y subilo manualmente a tu publicación en MercadoLibre.\n\n"
+        "**Cómo subir:** Mis publicaciones → Editar → sección Video → Agregar video → Guardar"
+    )
+    st.divider()
+    st.markdown(f"### 🎬 {len(ok_dict)} videos listos para descargar")
 
-    col_u1, col_u2, col_u3 = st.columns(3)
-    col_u1.metric("Total clips", len(ok_dict))
-    col_u2.metric("✅ Subidos a ML", len(ya_ok_up))
-    col_u3.metric("⏳ Pendientes", len(pendientes_up))
-
-    if pendientes_up and not st.session_state.get("subiendo"):
-        st.info(f"Se van a asociar **{len(pendientes_up)}** videos a sus publicaciones en ML.")
-        st.caption("ML recibe la URL del video de Cloudinary y lo procesa en sus servidores. Puede tardar unos minutos en aparecer en la publicación.")
-        if st.button("▶ Iniciar subida a ML", type="primary"):
-            st.session_state["subiendo"] = True
-            st.rerun()
-
-    if not pendientes_up and not st.session_state.get("subida_terminada"):
-        st.session_state["subida_terminada"] = True
-
-    # ── Procesamiento ──
-    if st.session_state.get("subiendo") and pendientes_up:
-        bar    = st.progress(0, text="Iniciando...")
-        estado = st.empty()
-        ok_run = err_run = 0
-        total  = len(pendientes_up)
-
-        for idx, item_id in enumerate(pendientes_up):
-            video_url = ok_dict[item_id]
+    for item_id, video_url in ok_dict.items():
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            st.markdown(
+                f'<div class="video-card video-ok">'
+                f'📦 <strong>{item_id}</strong><br>'
+                f'<small><a href="{video_url}" target="_blank">Ver video en Cloudinary ↗</a></small>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        with col_b:
             try:
-                hdrs_j = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json"
-                }
-                hdrs_a = {"Authorization": f"Bearer {token}"}
-
-                # ── PASO A: Subir el video a ML (obtener video_id) ──
-                # ML requiere descargar el MP4 y subirlo a sus servidores
-                video_bytes_r = requests.get(video_url, timeout=60)
-                if video_bytes_r.status_code != 200:
-                    raise Exception(f"No se pudo descargar el MP4 de Cloudinary: HTTP {video_bytes_r.status_code}")
-
-                # Subir el MP4 directamente al ítem vía multipart
-                upload_r = requests.post(
-                    f"https://api.mercadolibre.com/items/{item_id}/videos",
-                    headers=hdrs_a,
-                    files={"file": (f"{item_id}.mp4", video_bytes_r.content, "video/mp4")},
-                    timeout=120
-                )
-
-                if upload_r.status_code in (200, 201):
-                    ya_ok_up.add(item_id)
-                    upload_res.setdefault("ok", {})[item_id] = upload_r.json().get("id", "ok")
-                    ok_run += 1
-                else:
-                    # Fallback: intentar con URL directa de Cloudinary
-                    put_r = requests.post(
-                        f"https://api.mercadolibre.com/items/{item_id}/videos",
-                        headers=hdrs_j,
-                        json={"url": video_url},
-                        timeout=30
+                r = requests.get(video_url, timeout=60)
+                if r.status_code == 200:
+                    st.download_button(
+                        label="⬇ Descargar MP4",
+                        data=r.content,
+                        file_name=f"{item_id}.mp4",
+                        mime="video/mp4",
+                        key=f"dl_{item_id}"
                     )
-                    if put_r.status_code in (200, 201):
-                        ya_ok_up.add(item_id)
-                        upload_res.setdefault("ok", {})[item_id] = put_r.json().get("id", "ok")
-                        ok_run += 1
-                    else:
-                        raise Exception(f"HTTP {upload_r.status_code}: {upload_r.text[:300]}")
-
+                else:
+                    st.caption("Error al obtener video")
             except Exception as e:
-                ya_err_up[item_id] = str(e)
-                upload_res.setdefault("errores", {})[item_id] = str(e)
-                err_run += 1
-
-            save_json(UPLOAD_FILE, upload_res)
-            bar.progress((idx + 1) / total, text=f"{idx+1}/{total} — {item_id}")
-            estado.markdown(f"✅ **{ok_run}** subidos · ❌ **{err_run}** errores")
-            time.sleep(0.3)
-
-        bar.progress(1.0, text="✅ Completado")
-        st.session_state.pop("subiendo", None)
-        st.session_state["subida_terminada"] = True
-        st.rerun()
-
-    # ── Resultados de la subida ──
-    if st.session_state.get("subida_terminada") or not pendientes_up:
-        if ya_ok_up:
-            st.success(f"✅ {len(ya_ok_up)} videos asociados correctamente en MercadoLibre")
-            for item_id in ya_ok_up:
-                st.markdown(
-                    f'<div class="video-card video-ok">'
-                    f'📦 <strong>{item_id}</strong> — video asociado ✅'
-                    f'</div>',
-                    unsafe_allow_html=True
-                )
-        if ya_err_up:
-            st.divider()
-            st.markdown(f"### ❌ {len(ya_err_up)} errores al subir")
-            for item_id, motivo in ya_err_up.items():
-                st.markdown(
-                    f'<div class="video-card video-err">'
-                    f'📦 <strong>{item_id}</strong><br>'
-                    f'<small style="color:#ff6b6b">{motivo}</small>'
-                    f'</div>',
-                    unsafe_allow_html=True
-                )
-            if st.button("↺ Reintentar errores de subida"):
-                new_upload = {"ok": dict(upload_res.get("ok", {})), "errores": {}}
-                save_json(UPLOAD_FILE, new_upload)
-                st.session_state.pop("subida_terminada", None)
-                st.rerun()
+                st.caption(f"Error: {e}")
 
     st.divider()
     col_f1, col_f2 = st.columns(2)
     with col_f1:
         if st.button("← Volver al Paso 4"):
             save_json(STEP_FILE, 4)
-            st.session_state.pop("subida_terminada", None)
             st.rerun()
     with col_f2:
         if st.button("↺ Nueva tanda de publicaciones", key="nueva_tanda_p5"):
