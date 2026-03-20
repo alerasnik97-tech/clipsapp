@@ -546,38 +546,46 @@ elif step == 5:
         for idx, item_id in enumerate(pendientes_up):
             video_url = ok_dict[item_id]
             try:
-                hdrs = {
+                hdrs_j = {
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json"
                 }
-                # Subir video a ML vía endpoint de videos del ítem
-                r = requests.post(
-                    f"https://api.mercadolibre.com/items/{item_id}/videos",
-                    headers=hdrs,
-                    json={"url": video_url},
+                hdrs_a = {"Authorization": f"Bearer {token}"}
+
+                # ── PASO A: Subir el video a ML (obtener video_id) ──
+                # ML requiere descargar el MP4 y subirlo a sus servidores
+                video_bytes_r = requests.get(video_url, timeout=60)
+                if video_bytes_r.status_code != 200:
+                    raise Exception(f"No se pudo descargar el MP4 de Cloudinary: HTTP {video_bytes_r.status_code}")
+
+                upload_r = requests.post(
+                    "https://api.mercadolibre.com/videos/items/upload",
+                    headers=hdrs_a,
+                    files={"file": (f"{item_id}.mp4", video_bytes_r.content, "video/mp4")},
+                    timeout=120
+                )
+
+                if upload_r.status_code not in (200, 201):
+                    raise Exception(f"Upload video HTTP {upload_r.status_code}: {upload_r.text[:200]}")
+
+                video_id = upload_r.json().get("video_id") or upload_r.json().get("id")
+                if not video_id:
+                    raise Exception(f"ML no devolvió video_id: {upload_r.text[:200]}")
+
+                # ── PASO B: Asociar el video_id al ítem ──
+                put_r = requests.put(
+                    f"https://api.mercadolibre.com/items/{item_id}",
+                    headers=hdrs_j,
+                    json={"video_id": video_id},
                     timeout=30
                 )
-                if r.status_code in (200, 201):
+
+                if put_r.status_code in (200, 201):
                     ya_ok_up.add(item_id)
-                    upload_res.setdefault("ok", {})[item_id] = r.json().get("id", "ok")
+                    upload_res.setdefault("ok", {})[item_id] = video_id
                     ok_run += 1
                 else:
-                    # Intentar también via PUT al ítem
-                    r2 = requests.put(
-                        f"https://api.mercadolibre.com/items/{item_id}",
-                        headers=hdrs,
-                        json={"video_id": video_url},
-                        timeout=30
-                    )
-                    if r2.status_code in (200, 201):
-                        ya_ok_up.add(item_id)
-                        upload_res.setdefault("ok", {})[item_id] = "ok_via_put"
-                        ok_run += 1
-                    else:
-                        motivo = r.json().get("message", f"HTTP {r.status_code}")
-                        ya_err_up[item_id] = motivo
-                        upload_res.setdefault("errores", {})[item_id] = motivo
-                        err_run += 1
+                    raise Exception(f"PUT item HTTP {put_r.status_code}: {put_r.text[:200]}")
 
             except Exception as e:
                 ya_err_up[item_id] = str(e)
