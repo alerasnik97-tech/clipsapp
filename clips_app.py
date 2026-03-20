@@ -103,13 +103,14 @@ def obtener_url_imagen_ml(item_id, token):
 def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     """
     1. Sube la imagen a Cloudinary como resource_type='image'.
-    2. Usa explicit() para pre-renderizar el MP4 con zoompan.
-    3. Si eager no devuelve URL, construye la URL de video/upload manualmente.
+    2. Devuelve una URL video/upload apuntando a esa imagen con transformaciones.
+       Cloudinary permite entregar imágenes via el endpoint de video para
+       aplicar efectos como zoompan y generar MP4.
     """
     import base64
     public_id_img = f"ml_clips/img_{item_id}"
 
-    # ── PASO 1: Descargar imagen y subir como data URI ───────────────────────
+    # ── Descargar imagen y subir como data URI ───────────────────────────────
     img_r = requests.get(img_url, timeout=30)
     if img_r.status_code != 200:
         raise Exception(f"No se pudo descargar la imagen: HTTP {img_r.status_code}")
@@ -128,42 +129,29 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
         resource_type="image"
     )
 
-    # ── PASO 2: Construir transformaciones ───────────────────────────────────
-    transformaciones = [
-        {'width': 1080, 'height': 1920, 'crop': 'pad', 'background': fondo},
-        {'effect': 'zoompan:duration_12'},
-        {'fetch_format': 'mp4', 'quality': 'auto'}
-    ]
-    if audio_public_id and audio_public_id.strip():
-        transformaciones.insert(2, {
-            'overlay': f'audio:{audio_public_id.strip()}',
-            'resource_type': 'video'
-        })
-
-    # ── PASO 3: Pre-renderizar con explicit() ────────────────────────────────
-    try:
-        explicit_result = cloudinary.uploader.explicit(
-            public_id_img,
-            type="upload",
-            resource_type="image",
-            eager=transformaciones,
-            eager_async=False
-        )
-        eager_list = explicit_result.get("eager", [])
-        if eager_list and eager_list[0].get("secure_url"):
-            return eager_list[0]["secure_url"]
-    except Exception:
-        pass  # Si explicit falla, usamos la URL de transformación directa
-
-    # ── FALLBACK: URL de video/upload apuntando a la imagen ──────────────────
-    # Cloudinary permite usar video/upload con una imagen para aplicar
-    # transformaciones de video (zoompan, fetch_format=mp4, etc.)
-    cfg = cloudinary.config()
+    # ── Construir URL video/upload con transformaciones ──────────────────────
+    # Cloudinary soporta entregar una imagen via /video/upload/ y aplicarle
+    # efectos de video (zoompan, fetch_format=mp4). La imagen se convierte
+    # en un video MP4 al momento de la primera solicitud.
+    cfg   = cloudinary.config()
     cloud = cfg.cloud_name
-    trans_str = "b_{fondo},c_pad,h_1920,w_1080/e_zoompan:duration_12/f_mp4,q_auto".format(fondo=fondo)
+
     if audio_public_id and audio_public_id.strip():
-        trans_str = f"b_{fondo},c_pad,h_1920,w_1080/l_audio:{audio_public_id.strip()}/e_zoompan:duration_12/f_mp4,q_auto"
-    video_url = f"https://res.cloudinary.com/{cloud}/video/upload/{trans_str}/{public_id_img}.jpg"
+        audio_id = audio_public_id.strip().replace("/", ":")
+        trans = (
+            f"b_{fondo},c_pad,h_1920,w_1080"
+            f"/l_audio:{audio_id}"
+            f"/e_zoompan:duration_12"
+            f"/f_mp4,q_auto"
+        )
+    else:
+        trans = (
+            f"b_{fondo},c_pad,h_1920,w_1080"
+            f"/e_zoompan:duration_12"
+            f"/f_mp4,q_auto"
+        )
+
+    video_url = f"https://res.cloudinary.com/{cloud}/video/upload/{trans}/{public_id_img}.jpg"
     return video_url
 
 # ── ESTADO DESDE DISCO ──
