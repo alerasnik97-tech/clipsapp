@@ -102,12 +102,20 @@ def obtener_url_imagen_ml(item_id, token):
 
 def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     """
-    Sube la imagen a Cloudinary, pre-renderiza el video con eager y devuelve
-    la URL directa del MP4 ya listo para que ML pueda descargarlo sin problemas.
+    1. Descarga la imagen de ML y la sube a Cloudinary como recurso de VIDEO.
+    2. Usa eager+eager_async=False para pre-renderizar el MP4 antes de devolver.
+    3. Retorna la URL directa del MP4 ya listo.
     """
     public_id = f"ml_clips/{item_id}"
 
-    # 1. Construir transformaciones
+    # 1. Descargar la imagen desde ML para subirla como bytes
+    #    (evita problemas con URLs de ML que requieren autenticación)
+    img_r = requests.get(img_url, timeout=30)
+    if img_r.status_code != 200:
+        raise Exception(f"No se pudo descargar la imagen de ML: HTTP {img_r.status_code}")
+    img_bytes = img_r.content
+
+    # 2. Construir transformaciones eager (imagen → video MP4 9:16 con zoompan)
     transformaciones = [
         {'width': 1080, 'height': 1920, 'crop': 'pad', 'background': fondo},
         {'effect': 'zoompan:duration_12'},
@@ -119,26 +127,25 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
             'resource_type': 'video'
         })
 
-    # 2. Subir imagen Y pre-renderizar el video en un solo paso con eager.
-    # eager_async=False fuerza a Cloudinary a terminar el render antes de responder,
-    # así ML recibe una URL de MP4 ya existente y no una transformación on-the-fly.
+    # 3. Subir como resource_type="video" para que Cloudinary genere el MP4.
+    #    eager_async=False espera a que el render termine antes de responder.
     result = cloudinary.uploader.upload(
-        img_url,
+        img_bytes,
         public_id=public_id,
         overwrite=True,
-        resource_type="image",
+        resource_type="video",
         eager=transformaciones,
         eager_async=False
     )
 
-    # 3. Extraer la URL directa del video pre-renderizado
+    # 4. Extraer la URL del MP4 pre-renderizado desde eager
     eager_list = result.get("eager", [])
     if eager_list and eager_list[0].get("secure_url"):
         return eager_list[0]["secure_url"]
 
-    # Fallback: URL de transformación (por si eager falla)
+    # Fallback: construir la URL de transformación manualmente
     video_url, _ = cloudinary.utils.cloudinary_url(
-        f"{public_id}.jpg",
+        f"{public_id}.mp4",
         resource_type="video",
         transformation=transformaciones
     )
