@@ -418,15 +418,14 @@ elif step == 4:
     st.divider()
 
     # ── CSV para descarga ──
+    # ── Vista de clips exitosos ──
     if ok_dict:
         filas = [{"ID Publicacion": k, "Video URL": v} for k, v in ok_dict.items()]
         if err_dict:
             filas += [{"ID Publicacion": k, "Video URL": f"ERROR: {v}"} for k, v in err_dict.items()]
         df_export = pd.DataFrame(filas)
-
         csv_buf = io.StringIO()
         df_export.to_csv(csv_buf, index=False)
-
         st.download_button(
             label="💾 Descargar CSV con todos los links",
             data=csv_buf.getvalue().encode("utf-8"),
@@ -434,13 +433,9 @@ elif step == 4:
             mime="text/csv",
             type="primary"
         )
-
         st.divider()
-
-        # ── Vista de clips exitosos ──
         st.markdown(f"### ✅ {len(ok_dict)} clips generados correctamente")
         st.caption("Cada URL es un video listo para usar. Cloudinary lo renderiza en el momento de la primera visita.")
-
         for item_id, video_url in ok_dict.items():
             st.markdown(
                 f'<div class="video-card video-ok">'
@@ -450,29 +445,27 @@ elif step == 4:
                 unsafe_allow_html=True
             )
 
-        # ── Vista de errores ──
-        if err_dict:
-            st.divider()
-            st.markdown(f"### ❌ {len(err_dict)} errores")
-            with st.expander("Ver detalle de errores"):
-                for item_id, motivo in err_dict.items():
-                    st.markdown(
-                        f'<div class="video-card video-err">'
-                        f'📦 <strong>{item_id}</strong> — <small>{motivo}</small>'
-                        f'</div>',
-                        unsafe_allow_html=True
-                    )
+    # ── Vista de errores (siempre visible si existen) ──
+    if err_dict:
+        st.divider()
+        st.markdown(f"### ❌ {len(err_dict)} errores")
+        for item_id, motivo in err_dict.items():
+            st.markdown(
+                f'<div class="video-card video-err">'
+                f'📦 <strong>{item_id}</strong><br>'
+                f'<small style="color:#ff6b6b">{motivo}</small>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        if st.button("↺ Reintentar errores"):
+            new_results = {"ok": ok_dict, "errores": {}}
+            save_json(RESULTS_FILE, new_results)
+            save_json(ITEMS_FILE, list(err_dict.keys()))
+            save_json(STEP_FILE, 3)
+            st.session_state.pop("clips_terminado", None)
+            st.rerun()
 
-            # Opción de reintentar solo los fallados
-            if st.button("↺ Reintentar errores"):
-                new_results = {"ok": ok_dict, "errores": {}}
-                save_json(RESULTS_FILE, new_results)
-                save_json(ITEMS_FILE, list(err_dict.keys()))
-                save_json(STEP_FILE, 3)
-                st.session_state.pop("clips_terminado", None)
-                st.rerun()
-
-    else:
+    if not ok_dict and not err_dict:
         st.warning("No hay resultados. Volvé al Paso 3 para generar los clips.")
         if st.button("← Volver al Paso 3", key="volver_p3_sin_resultados"):
             save_json(STEP_FILE, 3); st.rerun()
