@@ -178,27 +178,38 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     if audio_public_id and audio_public_id.strip():
         try:
             import subprocess
+            import imageio_ffmpeg
+            ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()  # ffmpeg incluido con imageio-ffmpeg
+
             cfg_c = cloudinary.config()
             audio_id = audio_public_id.strip()
-            # Intentar primero como video/upload (MP3 subido como video en Cloudinary)
-            audio_url = f"https://res.cloudinary.com/{cfg_c.cloud_name}/video/upload/{audio_id}.mp3"
-            audio_r = requests.get(audio_url, timeout=30)
-            if audio_r.status_code != 200:
-                # Fallback: raw/upload
-                audio_url = f"https://res.cloudinary.com/{cfg_c.cloud_name}/raw/upload/{audio_id}"
-                audio_r = requests.get(audio_url, timeout=30)
 
-            if audio_r.status_code == 200:
+            # Probar todas las URLs posibles de Cloudinary para el audio
+            audio_urls = [
+                f"https://res.cloudinary.com/{cfg_c.cloud_name}/video/upload/{audio_id}.mp3",
+                f"https://res.cloudinary.com/{cfg_c.cloud_name}/video/upload/{audio_id}",
+                f"https://res.cloudinary.com/{cfg_c.cloud_name}/raw/upload/{audio_id}.mp3",
+                f"https://res.cloudinary.com/{cfg_c.cloud_name}/raw/upload/{audio_id}",
+            ]
+
+            audio_bytes = None
+            for audio_url in audio_urls:
+                r = requests.get(audio_url, timeout=30)
+                if r.status_code == 200 and len(r.content) > 1000:
+                    audio_bytes = r.content
+                    break
+
+            if audio_bytes:
                 tmp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-                tmp_audio.write(audio_r.content)
+                tmp_audio.write(audio_bytes)
                 tmp_audio.close()
 
                 tmp_mixed = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tmp_mixed.close()
 
-                # ffmpeg: mezclar video + audio, recortar al largo del video
+                # Mezclar video + audio con el ffmpeg de imageio-ffmpeg
                 subprocess.run([
-                    "ffmpeg", "-y",
+                    ffmpeg_bin, "-y",
                     "-i", tmp_video.name,
                     "-i", tmp_audio.name,
                     "-c:v", "copy",
@@ -211,8 +222,8 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
                 os.unlink(tmp_video.name)
                 os.unlink(tmp_audio.name)
                 output_path = tmp_mixed.name
-        except Exception:
-            # Si falla el audio, igual subimos el video sin audio
+        except Exception as e:
+            # Si falla el audio, subimos el video sin audio
             output_path = tmp_video.name
 
     # ── Subir MP4 a Cloudinary ───────────────────────────────────────────────
