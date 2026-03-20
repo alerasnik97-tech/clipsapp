@@ -558,34 +558,32 @@ elif step == 5:
                 if video_bytes_r.status_code != 200:
                     raise Exception(f"No se pudo descargar el MP4 de Cloudinary: HTTP {video_bytes_r.status_code}")
 
+                # Subir el MP4 directamente al ítem vía multipart
                 upload_r = requests.post(
-                    "https://api.mercadolibre.com/videos/items/upload",
+                    f"https://api.mercadolibre.com/items/{item_id}/videos",
                     headers=hdrs_a,
                     files={"file": (f"{item_id}.mp4", video_bytes_r.content, "video/mp4")},
                     timeout=120
                 )
 
-                if upload_r.status_code not in (200, 201):
-                    raise Exception(f"Upload video HTTP {upload_r.status_code}: {upload_r.text[:200]}")
-
-                video_id = upload_r.json().get("video_id") or upload_r.json().get("id")
-                if not video_id:
-                    raise Exception(f"ML no devolvió video_id: {upload_r.text[:200]}")
-
-                # ── PASO B: Asociar el video_id al ítem ──
-                put_r = requests.put(
-                    f"https://api.mercadolibre.com/items/{item_id}",
-                    headers=hdrs_j,
-                    json={"video_id": video_id},
-                    timeout=30
-                )
-
-                if put_r.status_code in (200, 201):
+                if upload_r.status_code in (200, 201):
                     ya_ok_up.add(item_id)
-                    upload_res.setdefault("ok", {})[item_id] = video_id
+                    upload_res.setdefault("ok", {})[item_id] = upload_r.json().get("id", "ok")
                     ok_run += 1
                 else:
-                    raise Exception(f"PUT item HTTP {put_r.status_code}: {put_r.text[:200]}")
+                    # Fallback: intentar con URL directa de Cloudinary
+                    put_r = requests.post(
+                        f"https://api.mercadolibre.com/items/{item_id}/videos",
+                        headers=hdrs_j,
+                        json={"url": video_url},
+                        timeout=30
+                    )
+                    if put_r.status_code in (200, 201):
+                        ya_ok_up.add(item_id)
+                        upload_res.setdefault("ok", {})[item_id] = put_r.json().get("id", "ok")
+                        ok_run += 1
+                    else:
+                        raise Exception(f"HTTP {upload_r.status_code}: {upload_r.text[:300]}")
 
             except Exception as e:
                 ya_err_up[item_id] = str(e)
