@@ -102,20 +102,26 @@ def obtener_url_imagen_ml(item_id, token):
 
 def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     """
-    1. Descarga la imagen de ML y la sube a Cloudinary como recurso de VIDEO.
-    2. Usa eager+eager_async=False para pre-renderizar el MP4 antes de devolver.
-    3. Retorna la URL directa del MP4 ya listo.
+    Proceso en 2 pasos:
+    1. Sube la imagen a Cloudinary como resource_type='image' (acepta JPEG/PNG).
+    2. Genera el video MP4 usando esa imagen como base con resource_type='video' + eager.
+    Retorna la URL directa del MP4 pre-renderizado.
     """
-    public_id = f"ml_clips/{item_id}"
+    public_id_img   = f"ml_clips/img_{item_id}"
+    public_id_video = f"ml_clips/vid_{item_id}"
 
-    # 1. Descargar la imagen desde ML para subirla como bytes
-    #    (evita problemas con URLs de ML que requieren autenticación)
-    img_r = requests.get(img_url, timeout=30)
-    if img_r.status_code != 200:
-        raise Exception(f"No se pudo descargar la imagen de ML: HTTP {img_r.status_code}")
-    img_bytes = img_r.content
+    # ── PASO 1: Subir la imagen ──────────────────────────────────────────────
+    img_result = cloudinary.uploader.upload(
+        img_url,
+        public_id=public_id_img,
+        overwrite=True,
+        resource_type="image"
+    )
+    img_uploaded_url = img_result.get("secure_url")
+    if not img_uploaded_url:
+        raise Exception("Cloudinary no devolvió URL de la imagen subida")
 
-    # 2. Construir transformaciones eager (imagen → video MP4 9:16 con zoompan)
+    # ── PASO 2: Generar el video con zoompan usando la imagen subida ─────────
     transformaciones = [
         {'width': 1080, 'height': 1920, 'crop': 'pad', 'background': fondo},
         {'effect': 'zoompan:duration_12'},
@@ -127,25 +133,25 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
             'resource_type': 'video'
         })
 
-    # 3. Subir como resource_type="video" para que Cloudinary genere el MP4.
-    #    eager_async=False espera a que el render termine antes de responder.
-    result = cloudinary.uploader.upload(
-        img_bytes,
-        public_id=public_id,
+    # Subir la imagen YA SUBIDA como video para que Cloudinary aplique las transformaciones.
+    # eager_async=False espera a que el MP4 esté listo antes de responder.
+    video_result = cloudinary.uploader.upload(
+        img_uploaded_url,
+        public_id=public_id_video,
         overwrite=True,
         resource_type="video",
         eager=transformaciones,
         eager_async=False
     )
 
-    # 4. Extraer la URL del MP4 pre-renderizado desde eager
-    eager_list = result.get("eager", [])
+    # Extraer URL del MP4 pre-renderizado
+    eager_list = video_result.get("eager", [])
     if eager_list and eager_list[0].get("secure_url"):
         return eager_list[0]["secure_url"]
 
-    # Fallback: construir la URL de transformación manualmente
+    # Fallback: URL de transformación on-the-fly
     video_url, _ = cloudinary.utils.cloudinary_url(
-        f"{public_id}.mp4",
+        f"{public_id_video}.mp4",
         resource_type="video",
         transformation=transformaciones
     )
