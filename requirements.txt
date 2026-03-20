@@ -6,3 +6,5 @@ pillow
 rembg
 onnxruntime
 cloudinary
+imageio
+imageio-ffmpeg
