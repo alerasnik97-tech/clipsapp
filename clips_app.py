@@ -474,13 +474,13 @@ elif step == 4:
 
     else:
         st.warning("No hay resultados. Volvé al Paso 3 para generar los clips.")
-        if st.button("← Volver al Paso 3"):
+        if st.button("← Volver al Paso 3", key="volver_p3_sin_resultados"):
             save_json(STEP_FILE, 3); st.rerun()
 
     st.divider()
     col_b1, col_b2 = st.columns([1,1])
     with col_b1:
-        if st.button("← Volver al Paso 3"):
+        if st.button("← Volver al Paso 3", key="volver_p3_footer"):
             save_json(STEP_FILE, 3)
             st.session_state.pop("clips_terminado", None)
             st.rerun()
