@@ -27,6 +27,7 @@ STEP_FILE     = "step_clips.json"
 RESULTS_FILE  = "results_clips.json"
 CLOUD_FILE    = "cloud_config.json"
 UPLOAD_FILE   = "upload_clips.json"
+CREDS_FILE    = "cloudinary_creds.json"  # Persiste entre reinicios
 
 st.set_page_config(page_title="Generador de Clips ML", page_icon="🎬", layout="wide")
 st.markdown("""
@@ -158,28 +159,70 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
         frame = np.array(Image.fromarray(crop).resize((W, H), Image.LANCZOS))
         frames.append(frame)
 
-    # ── Codificar MP4 ────────────────────────────────────────────────────────
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp.close()
+    # ── Codificar MP4 (sin audio primero) ───────────────────────────────────
+    tmp_video = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_video.close()
 
     writer = imageio.get_writer(
-        tmp.name,
+        tmp_video.name,
         fps=FPS,
         codec="libx264",
-        output_params=["-pix_fmt", "yuv420p", "-crf", "28", "-preset", "ultrafast"]
+        output_params=["-pix_fmt", "yuv420p", "-crf", "35", "-preset", "ultrafast", "-tune", "stillimage"]
     )
     for frame in frames:
         writer.append_data(frame)
     writer.close()
 
+    # ── Mezclar audio si hay Public ID ───────────────────────────────────────
+    output_path = tmp_video.name
+    if audio_public_id and audio_public_id.strip():
+        try:
+            import subprocess
+            cfg_c = cloudinary.config()
+            audio_id = audio_public_id.strip()
+            # Intentar primero como video/upload (MP3 subido como video en Cloudinary)
+            audio_url = f"https://res.cloudinary.com/{cfg_c.cloud_name}/video/upload/{audio_id}.mp3"
+            audio_r = requests.get(audio_url, timeout=30)
+            if audio_r.status_code != 200:
+                # Fallback: raw/upload
+                audio_url = f"https://res.cloudinary.com/{cfg_c.cloud_name}/raw/upload/{audio_id}"
+                audio_r = requests.get(audio_url, timeout=30)
+
+            if audio_r.status_code == 200:
+                tmp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+                tmp_audio.write(audio_r.content)
+                tmp_audio.close()
+
+                tmp_mixed = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tmp_mixed.close()
+
+                # ffmpeg: mezclar video + audio, recortar al largo del video
+                subprocess.run([
+                    "ffmpeg", "-y",
+                    "-i", tmp_video.name,
+                    "-i", tmp_audio.name,
+                    "-c:v", "copy",
+                    "-c:a", "aac", "-b:a", "128k",
+                    "-shortest",
+                    "-map", "0:v:0", "-map", "1:a:0",
+                    tmp_mixed.name
+                ], check=True, capture_output=True)
+
+                os.unlink(tmp_video.name)
+                os.unlink(tmp_audio.name)
+                output_path = tmp_mixed.name
+        except Exception:
+            # Si falla el audio, igual subimos el video sin audio
+            output_path = tmp_video.name
+
     # ── Subir MP4 a Cloudinary ───────────────────────────────────────────────
     result = cloudinary.uploader.upload(
-        tmp.name,
+        output_path,
         public_id=public_id,
         resource_type="video",
         overwrite=True
     )
-    os.unlink(tmp.name)
+    os.unlink(output_path)
 
     url = result.get("secure_url")
     if not url:
@@ -192,6 +235,7 @@ items      = load_json(ITEMS_FILE, [])
 results    = load_json(RESULTS_FILE, {"ok": {}, "errores": {}})
 cloud_cfg  = load_json(CLOUD_FILE, {})
 upload_res = load_json(UPLOAD_FILE, {"ok": {}, "errores": {}})
+saved_creds = load_json(CREDS_FILE, {})  # Credenciales persistentes
 
 # ── HEADER ──
 st.markdown('<div class="main-title">🎬 Generador de Clips ML</div>', unsafe_allow_html=True)
@@ -200,6 +244,7 @@ st.markdown('<div class="sub-title">Convertí las imágenes de tus publicaciones
 col_r1, col_r2 = st.columns([6,1])
 with col_r2:
     if st.button('↺ Reiniciar'):
+        # NO borramos CREDS_FILE para mantener las credenciales guardadas
         for f in [ITEMS_FILE, STEP_FILE, RESULTS_FILE, CLOUD_FILE, UPLOAD_FILE]:
             if os.path.exists(f): os.remove(f)
         for key in ["token", "generando", "clips_terminado", "subiendo", "subida_terminada"]:
@@ -292,6 +337,12 @@ elif step == 2:
 
     st.info(f"📋 Se van a generar clips para **{len(items)}** publicaciones.")
 
+    # Pre-llenar desde credenciales guardadas (persisten entre reinicios)
+    prefill = cloud_cfg if cloud_cfg else saved_creds
+
+    if saved_creds:
+        st.success("✅ Credenciales guardadas cargadas automáticamente.")
+
     with st.expander("ℹ️ ¿Dónde encuentro mis credenciales de Cloudinary?", expanded=False):
         st.markdown("""
 1. Entrá a [cloudinary.com/console](https://cloudinary.com/console)  
@@ -303,24 +354,24 @@ elif step == 2:
     with col1:
         cloud_name = st.text_input(
             "Cloud Name",
-            value=cloud_cfg.get("cloud_name", ""),
+            value=prefill.get("cloud_name", ""),
             placeholder="mi-cloud"
         )
         api_key = st.text_input(
             "API Key",
-            value=cloud_cfg.get("api_key", ""),
+            value=prefill.get("api_key", ""),
             placeholder="123456789012345"
         )
     with col2:
         api_secret = st.text_input(
             "API Secret",
-            value=cloud_cfg.get("api_secret", ""),
+            value=prefill.get("api_secret", ""),
             placeholder="AbCdEfGhIjKlMnOpQrStUv",
             type="password"
         )
         audio_public_id = st.text_input(
             "Public ID del audio (opcional)",
-            value=cloud_cfg.get("audio_public_id", ""),
+            value=prefill.get("audio_public_id", ""),
             placeholder="musica_fondo_stock",
             help="ID del archivo de audio que ya subiste a Cloudinary. Dejalo vacío si no querés música."
         )
@@ -352,6 +403,7 @@ elif step == 2:
                 "fondo": fondo_opcion
             }
             save_json(CLOUD_FILE, cfg)
+            save_json(CREDS_FILE, cfg)  # Guardar permanentemente para la próxima vez
             save_json(STEP_FILE, 3)
             st.rerun()
 
@@ -547,10 +599,10 @@ elif step == 4:
         st.rerun()
 
 # ══════════════════════════════════════════════════════════════
-# PASO 5 — Descargar videos para subir a MercadoLibre
+# PASO 5 — Subir videos a MercadoLibre
 # ══════════════════════════════════════════════════════════════
 elif step == 5:
-    st.subheader("Paso 5 — Descargar videos")
+    st.subheader("Paso 5 — Subir videos a MercadoLibre")
 
     ok_dict = results.get("ok", {})
     if not ok_dict:
@@ -559,46 +611,123 @@ elif step == 5:
             save_json(STEP_FILE, 3); st.rerun()
         st.stop()
 
-    st.info(
-        "📥 Descargá cada video y subilo manualmente a tu publicación en MercadoLibre.\n\n"
-        "**Cómo subir:** Mis publicaciones → Editar → sección Video → Agregar video → Guardar"
-    )
-    st.divider()
+    ya_ok_up  = set(upload_res.get("ok", {}).keys())
+    ya_err_up = dict(upload_res.get("errores", {}))
+    pendientes_up = [i for i in ok_dict.keys() if i not in ya_ok_up and i not in ya_err_up]
 
-    st.markdown(f"### 🎬 {len(ok_dict)} videos listos para descargar")
+    col_u1, col_u2, col_u3 = st.columns(3)
+    col_u1.metric("Total clips", len(ok_dict))
+    col_u2.metric("✅ Subidos a ML", len(ya_ok_up))
+    col_u3.metric("⏳ Pendientes", len(pendientes_up))
 
-    for item_id, video_url in ok_dict.items():
-        col_a, col_b = st.columns([3, 1])
-        with col_a:
-            st.markdown(
-                f'<div class="video-card video-ok">'
-                f'📦 <strong>{item_id}</strong><br>'
-                f'<small><a href="{video_url}" target="_blank">Ver video en Cloudinary ↗</a></small>'
-                f'</div>',
-                unsafe_allow_html=True
-            )
-        with col_b:
-            # Descargar el MP4 y ofrecer botón de descarga directa
+    if pendientes_up and not st.session_state.get("subiendo"):
+        st.info(f"Se van a asociar **{len(pendientes_up)}** videos a sus publicaciones en ML.")
+        st.caption("ML recibe la URL del video de Cloudinary y lo procesa en sus servidores. Puede tardar unos minutos en aparecer en la publicación.")
+        if st.button("▶ Iniciar subida a ML", type="primary"):
+            st.session_state["subiendo"] = True
+            st.rerun()
+
+    if not pendientes_up and not st.session_state.get("subida_terminada"):
+        st.session_state["subida_terminada"] = True
+
+    # ── Procesamiento ──
+    if st.session_state.get("subiendo") and pendientes_up:
+        bar    = st.progress(0, text="Iniciando...")
+        estado = st.empty()
+        ok_run = err_run = 0
+        total  = len(pendientes_up)
+
+        for idx, item_id in enumerate(pendientes_up):
+            video_url = ok_dict[item_id]
             try:
-                r = requests.get(video_url, timeout=60)
-                if r.status_code == 200:
-                    st.download_button(
-                        label="⬇ Descargar MP4",
-                        data=r.content,
-                        file_name=f"{item_id}.mp4",
-                        mime="video/mp4",
-                        key=f"dl_{item_id}"
-                    )
+                hdrs_j = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json"
+                }
+                hdrs_a = {"Authorization": f"Bearer {token}"}
+
+                # ── PASO A: Subir el video a ML (obtener video_id) ──
+                # ML requiere descargar el MP4 y subirlo a sus servidores
+                video_bytes_r = requests.get(video_url, timeout=60)
+                if video_bytes_r.status_code != 200:
+                    raise Exception(f"No se pudo descargar el MP4 de Cloudinary: HTTP {video_bytes_r.status_code}")
+
+                # Subir el MP4 directamente al ítem vía multipart
+                upload_r = requests.post(
+                    f"https://api.mercadolibre.com/items/{item_id}/videos",
+                    headers=hdrs_a,
+                    files={"file": (f"{item_id}.mp4", video_bytes_r.content, "video/mp4")},
+                    timeout=120
+                )
+
+                if upload_r.status_code in (200, 201):
+                    ya_ok_up.add(item_id)
+                    upload_res.setdefault("ok", {})[item_id] = upload_r.json().get("id", "ok")
+                    ok_run += 1
                 else:
-                    st.caption("Error al obtener video")
+                    # Fallback: intentar con URL directa de Cloudinary
+                    put_r = requests.post(
+                        f"https://api.mercadolibre.com/items/{item_id}/videos",
+                        headers=hdrs_j,
+                        json={"url": video_url},
+                        timeout=30
+                    )
+                    if put_r.status_code in (200, 201):
+                        ya_ok_up.add(item_id)
+                        upload_res.setdefault("ok", {})[item_id] = put_r.json().get("id", "ok")
+                        ok_run += 1
+                    else:
+                        raise Exception(f"HTTP {upload_r.status_code}: {upload_r.text[:300]}")
+
             except Exception as e:
-                st.caption(f"Error: {e}")
+                ya_err_up[item_id] = str(e)
+                upload_res.setdefault("errores", {})[item_id] = str(e)
+                err_run += 1
+
+            save_json(UPLOAD_FILE, upload_res)
+            bar.progress((idx + 1) / total, text=f"{idx+1}/{total} — {item_id}")
+            estado.markdown(f"✅ **{ok_run}** subidos · ❌ **{err_run}** errores")
+            time.sleep(0.3)
+
+        bar.progress(1.0, text="✅ Completado")
+        st.session_state.pop("subiendo", None)
+        st.session_state["subida_terminada"] = True
+        st.rerun()
+
+    # ── Resultados de la subida ──
+    if st.session_state.get("subida_terminada") or not pendientes_up:
+        if ya_ok_up:
+            st.success(f"✅ {len(ya_ok_up)} videos asociados correctamente en MercadoLibre")
+            for item_id in ya_ok_up:
+                st.markdown(
+                    f'<div class="video-card video-ok">'
+                    f'📦 <strong>{item_id}</strong> — video asociado ✅'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+        if ya_err_up:
+            st.divider()
+            st.markdown(f"### ❌ {len(ya_err_up)} errores al subir")
+            for item_id, motivo in ya_err_up.items():
+                st.markdown(
+                    f'<div class="video-card video-err">'
+                    f'📦 <strong>{item_id}</strong><br>'
+                    f'<small style="color:#ff6b6b">{motivo}</small>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+            if st.button("↺ Reintentar errores de subida"):
+                new_upload = {"ok": dict(upload_res.get("ok", {})), "errores": {}}
+                save_json(UPLOAD_FILE, new_upload)
+                st.session_state.pop("subida_terminada", None)
+                st.rerun()
 
     st.divider()
     col_f1, col_f2 = st.columns(2)
     with col_f1:
         if st.button("← Volver al Paso 4"):
             save_json(STEP_FILE, 4)
+            st.session_state.pop("subida_terminada", None)
             st.rerun()
     with col_f2:
         if st.button("↺ Nueva tanda de publicaciones", key="nueva_tanda_p5"):
