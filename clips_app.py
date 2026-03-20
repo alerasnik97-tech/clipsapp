@@ -124,7 +124,7 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
         raise Exception(f"Error al descargar imagen: HTTP {img_r.status_code}")
 
     W, H   = 1080, 1920
-    FPS    = 15          # 15fps = buen balance calidad/velocidad
+    FPS    = 10          # 10fps = archivo más liviano
     DURACION = 12
     TOTAL_FRAMES = FPS * DURACION
 
@@ -166,7 +166,7 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
         tmp.name,
         fps=FPS,
         codec="libx264",
-        output_params=["-pix_fmt", "yuv420p", "-crf", "28", "-preset", "ultrafast"]
+        output_params=["-pix_fmt", "yuv420p", "-crf", "35", "-preset", "ultrafast", "-tune", "stillimage"]
     )
     for frame in frames:
         writer.append_data(frame)
