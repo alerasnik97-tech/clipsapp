@@ -102,57 +102,89 @@ def obtener_url_imagen_ml(item_id, token):
 
 def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     """
-    1. Sube la imagen a Cloudinary como resource_type='image'.
-    2. Devuelve una URL video/upload apuntando a esa imagen con transformaciones.
-       Cloudinary permite entregar imágenes via el endpoint de video para
-       aplicar efectos como zoompan y generar MP4.
-    """
-    import base64
-    public_id_img = f"ml_clips/img_{item_id}"
+    Genera el video MP4 localmente con Python (sin depender de transformaciones
+    de Cloudinary) y sube el archivo final.
 
-    # ── Descargar imagen y subir como data URI ───────────────────────────────
+    Flujo:
+    1. Descarga la imagen de ML.
+    2. Crea frames con efecto Ken Burns (zoom-in suave) usando Pillow + numpy.
+    3. Codifica el MP4 con imageio + ffmpeg.
+    4. Sube el MP4 a Cloudinary y devuelve la URL directa.
+    """
+    import io, tempfile, os
+    import numpy as np
+    from PIL import Image, ImageOps, ImageFilter
+    import imageio
+
+    public_id = f"ml_clips/{item_id}"
+
+    # ── Descargar imagen ─────────────────────────────────────────────────────
     img_r = requests.get(img_url, timeout=30)
     if img_r.status_code != 200:
-        raise Exception(f"No se pudo descargar la imagen: HTTP {img_r.status_code}")
+        raise Exception(f"Error al descargar imagen: HTTP {img_r.status_code}")
 
-    content_type = img_r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-    if content_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
-        content_type = "image/jpeg"
+    W, H   = 1080, 1920
+    FPS    = 15          # 15fps = buen balance calidad/velocidad
+    DURACION = 12
+    TOTAL_FRAMES = FPS * DURACION
 
-    img_b64  = base64.b64encode(img_r.content).decode("utf-8")
-    data_uri = f"data:{content_type};base64,{img_b64}"
+    # ── Preparar frame base 1080×1920 ────────────────────────────────────────
+    img = Image.open(io.BytesIO(img_r.content)).convert("RGB")
 
-    cloudinary.uploader.upload(
-        data_uri,
-        public_id=public_id_img,
-        overwrite=True,
-        resource_type="image"
-    )
-
-    # ── Construir URL video/upload con transformaciones ──────────────────────
-    # Cloudinary soporta entregar una imagen via /video/upload/ y aplicarle
-    # efectos de video (zoompan, fetch_format=mp4). La imagen se convierte
-    # en un video MP4 al momento de la primera solicitud.
-    cfg   = cloudinary.config()
-    cloud = cfg.cloud_name
-
-    if audio_public_id and audio_public_id.strip():
-        audio_id = audio_public_id.strip().replace("/", ":")
-        trans = (
-            f"b_{fondo},c_pad,h_1920,w_1080"
-            f"/l_audio:{audio_id}"
-            f"/e_zoompan:duration_12"
-            f"/f_mp4,q_auto"
-        )
+    if fondo == "blurred":
+        # Fondo: imagen escalada y difuminada
+        bg = img.copy().resize((W, H), Image.LANCZOS).filter(ImageFilter.GaussianBlur(radius=30))
     else:
-        trans = (
-            f"b_{fondo},c_pad,h_1920,w_1080"
-            f"/e_zoompan:duration_12"
-            f"/f_mp4,q_auto"
-        )
+        color_map = {"white": (255, 255, 255), "black": (0, 0, 0)}
+        bg = Image.new("RGB", (W, H), color_map.get(fondo, (255, 255, 255)))
 
-    video_url = f"https://res.cloudinary.com/{cloud}/video/upload/{trans}/{public_id_img}.jpg"
-    return video_url
+    # Redimensionar imagen para que entre en 1080×1920 con padding
+    img_fit = ImageOps.contain(img, (W, H), method=Image.LANCZOS)
+    paste_x = (W - img_fit.width)  // 2
+    paste_y = (H - img_fit.height) // 2
+    bg.paste(img_fit, (paste_x, paste_y))
+    frame_base = np.array(bg)
+
+    # ── Generar frames con Ken Burns (zoom-in suave de 1.0 → 1.2) ────────────
+    frames = []
+    for i in range(TOTAL_FRAMES):
+        t     = i / max(TOTAL_FRAMES - 1, 1)
+        scale = 1.0 + 0.2 * t           # zoom de 1.0 a 1.2
+        new_w = int(W / scale)
+        new_h = int(H / scale)
+        x1    = (W - new_w) // 2
+        y1    = (H - new_h) // 2
+        crop  = frame_base[y1:y1 + new_h, x1:x1 + new_w]
+        frame = np.array(Image.fromarray(crop).resize((W, H), Image.LANCZOS))
+        frames.append(frame)
+
+    # ── Codificar MP4 ────────────────────────────────────────────────────────
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp.close()
+
+    writer = imageio.get_writer(
+        tmp.name,
+        fps=FPS,
+        codec="libx264",
+        output_params=["-pix_fmt", "yuv420p", "-crf", "28", "-preset", "ultrafast"]
+    )
+    for frame in frames:
+        writer.append_data(frame)
+    writer.close()
+
+    # ── Subir MP4 a Cloudinary ───────────────────────────────────────────────
+    result = cloudinary.uploader.upload(
+        tmp.name,
+        public_id=public_id,
+        resource_type="video",
+        overwrite=True
+    )
+    os.unlink(tmp.name)
+
+    url = result.get("secure_url")
+    if not url:
+        raise Exception("Cloudinary no devolvió URL del video subido")
+    return url
 
 # ── ESTADO DESDE DISCO ──
 step       = load_json(STEP_FILE, 1)
