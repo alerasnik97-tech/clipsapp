@@ -102,41 +102,46 @@ def obtener_url_imagen_ml(item_id, token):
 
 def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     """
-    Sube la imagen a Cloudinary y devuelve la URL del video 9:16 de 12 segundos.
+    Sube la imagen a Cloudinary, pre-renderiza el video con eager y devuelve
+    la URL directa del MP4 ya listo para que ML pueda descargarlo sin problemas.
     """
-    # 1. Subir imagen desde URL de ML a Cloudinary (servidor a servidor, muy rápido)
     public_id = f"ml_clips/{item_id}"
-    upload_result = cloudinary.uploader.upload(
-        img_url,
-        public_id=public_id,
-        overwrite=True,
-        resource_type="image"
-    )
 
-    # 2. Construir transformaciones
+    # 1. Construir transformaciones
     transformaciones = [
-        # Encuadre 9:16 con fondo elegido sin distorsionar la imagen
         {'width': 1080, 'height': 1920, 'crop': 'pad', 'background': fondo},
-        # Efecto zoom pan de 12 segundos (exigido por ML según ayuda 25505)
         {'effect': 'zoompan:duration_12'},
-        # Calidad automática + formato MP4
         {'fetch_format': 'mp4', 'quality': 'auto'}
     ]
-
-    # 3. Agregar audio si el usuario lo configuró
     if audio_public_id and audio_public_id.strip():
         transformaciones.insert(2, {
             'overlay': f'audio:{audio_public_id.strip()}',
             'resource_type': 'video'
         })
 
-    # 4. Generar URL del video con las transformaciones
+    # 2. Subir imagen Y pre-renderizar el video en un solo paso con eager.
+    # eager_async=False fuerza a Cloudinary a terminar el render antes de responder,
+    # así ML recibe una URL de MP4 ya existente y no una transformación on-the-fly.
+    result = cloudinary.uploader.upload(
+        img_url,
+        public_id=public_id,
+        overwrite=True,
+        resource_type="image",
+        eager=[transformaciones],
+        eager_async=False
+    )
+
+    # 3. Extraer la URL directa del video pre-renderizado
+    eager_list = result.get("eager", [])
+    if eager_list and eager_list[0].get("secure_url"):
+        return eager_list[0]["secure_url"]
+
+    # Fallback: URL de transformación (por si eager falla)
     video_url, _ = cloudinary.utils.cloudinary_url(
         f"{public_id}.jpg",
         resource_type="video",
         transformation=transformaciones
     )
-
     return video_url
 
 # ── ESTADO DESDE DISCO ──
