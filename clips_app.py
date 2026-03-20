@@ -102,39 +102,37 @@ def obtener_url_imagen_ml(item_id, token):
 
 def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     """
-    Proceso en 2 pasos:
-    1. Descarga la imagen y la sube a Cloudinary como data URI (MIME explícito).
-    2. Genera el video MP4 con zoompan usando esa imagen ya subida.
+    Proceso correcto para imagen → video en Cloudinary:
+    1. Sube la imagen (base64) como resource_type='image'.
+    2. Usa explicit() para aplicar transformaciones eager sobre esa imagen
+       y generar el MP4, sin re-subirla como video.
     """
     import base64
-    public_id_img   = f"ml_clips/img_{item_id}"
-    public_id_video = f"ml_clips/vid_{item_id}"
+    public_id_img = f"ml_clips/img_{item_id}"
 
     # ── PASO 1: Descargar imagen y subir como data URI ───────────────────────
-    # Usar data URI evita que Cloudinary intente inferir el tipo desde la URL.
     img_r = requests.get(img_url, timeout=30)
     if img_r.status_code != 200:
         raise Exception(f"No se pudo descargar la imagen: HTTP {img_r.status_code}")
 
-    # Detectar el content-type real de la imagen
     content_type = img_r.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
     if content_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
-        content_type = "image/jpeg"  # fallback seguro
+        content_type = "image/jpeg"
 
     img_b64  = base64.b64encode(img_r.content).decode("utf-8")
     data_uri = f"data:{content_type};base64,{img_b64}"
 
-    img_result = cloudinary.uploader.upload(
+    cloudinary.uploader.upload(
         data_uri,
         public_id=public_id_img,
         overwrite=True,
         resource_type="image"
     )
-    img_uploaded_url = img_result.get("secure_url")
-    if not img_uploaded_url:
-        raise Exception("Cloudinary no devolvió URL de la imagen subida")
 
-    # ── PASO 2: Generar el video con zoompan usando la imagen ya subida ──────
+    # ── PASO 2: Aplicar transformaciones sobre la imagen ya subida ───────────
+    # explicit() le dice a Cloudinary "tomá este asset que ya tenés y
+    # generá estas versiones eager". Así el MP4 se pre-renderiza sin
+    # tener que re-subir nada como resource_type='video'.
     transformaciones = [
         {'width': 1080, 'height': 1920, 'crop': 'pad', 'background': fondo},
         {'effect': 'zoompan:duration_12'},
@@ -146,25 +144,24 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
             'resource_type': 'video'
         })
 
-    # eager_async=False: espera a que Cloudinary termine el render del MP4
-    video_result = cloudinary.uploader.upload(
-        img_uploaded_url,
-        public_id=public_id_video,
-        overwrite=True,
-        resource_type="video",
+    explicit_result = cloudinary.uploader.explicit(
+        public_id_img,
+        type="upload",
+        resource_type="image",
         eager=transformaciones,
         eager_async=False
     )
 
-    eager_list = video_result.get("eager", [])
+    eager_list = explicit_result.get("eager", [])
     if eager_list and eager_list[0].get("secure_url"):
         return eager_list[0]["secure_url"]
 
-    # Fallback: URL de transformación on-the-fly
+    # Fallback: construir la URL manualmente
     video_url, _ = cloudinary.utils.cloudinary_url(
-        f"{public_id_video}.mp4",
-        resource_type="video",
-        transformation=transformaciones
+        f"{public_id_img}",
+        resource_type="image",
+        transformation=transformaciones,
+        format="mp4"
     )
     return video_url
 
