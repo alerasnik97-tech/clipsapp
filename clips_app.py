@@ -114,7 +114,7 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     """
     import io, tempfile, os
     import numpy as np
-    from PIL import Image, ImageOps, ImageFilter
+    from PIL import Image, ImageOps
     import imageio
 
     public_id = f"ml_clips/{item_id}"
@@ -132,19 +132,10 @@ def generar_clip_cloudinary(item_id, img_url, audio_public_id, fondo):
     # ── Preparar frame base 1080×1920 ────────────────────────────────────────
     img = Image.open(io.BytesIO(img_r.content)).convert("RGB")
 
-    if fondo == "blurred":
-        # Fondo: imagen escalada y difuminada
-        bg = img.copy().resize((W, H), Image.LANCZOS).filter(ImageFilter.GaussianBlur(radius=30))
-    else:
-        color_map = {"white": (255, 255, 255), "black": (0, 0, 0)}
-        bg = Image.new("RGB", (W, H), color_map.get(fondo, (255, 255, 255)))
-
-    # Redimensionar imagen para que entre en 1080×1920 con padding
-    img_fit = ImageOps.contain(img, (W, H), method=Image.LANCZOS)
-    paste_x = (W - img_fit.width)  // 2
-    paste_y = (H - img_fit.height) // 2
-    bg.paste(img_fit, (paste_x, paste_y))
-    frame_base = np.array(bg)
+    # Recortar/escalar la imagen para que llene exactamente 1080×1920 sin barras.
+    # ImageOps.fit hace crop centrado al aspect ratio destino → sin padding.
+    img_fit = ImageOps.fit(img, (W, H), method=Image.LANCZOS, centering=(0.5, 0.5))
+    frame_base = np.array(img_fit)
 
     # ── Generar frames con Ken Burns (zoom-in suave de 1.0 → 1.2) ────────────
     frames = []
@@ -410,16 +401,10 @@ elif step == 2:
     st.markdown("**Opciones del clip:**")
     col3, col4 = st.columns(2)
     with col3:
-        fondo_opcion = st.selectbox(
-            "Fondo del encuadre 9:16",
-            options=["white", "black", "blurred"],
-            index=0,
-            format_func=lambda x: {"white":"⬜ Blanco","black":"⬛ Negro","blurred":"🌫️ Difuminado"}[x],
-            help="Color de relleno cuando la imagen no ocupa todo el frame 9:16"
-        )
-    with col4:
         st.metric("Formato del video", "9:16 (1080×1920)")
+    with col4:
         st.metric("Duración", "12 segundos")
+    fondo_opcion = "fit"  # La imagen siempre llena el frame completo (sin barras)
 
     if st.button("Guardar y Continuar al Paso 3 →", type="primary"):
         if not cloud_name or not api_key or not api_secret:
